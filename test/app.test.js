@@ -28,3 +28,33 @@ test('follows script, holds for freestyle, reacquires distant phrase',()=>{
  assert.equal(vm.runInContext("findBestMatch(['shutter','before','recording'])",context),null);
  assert.ok(vm.runInContext("findBestMatch(['adjust','the','shutter','before','recording','today']).end",context)>250);
 });
+
+test('browser speech follows revisions, holds freestyle, restarts and stops safely',()=>{
+ const elements=new Map();
+ const element=id=>{if(!elements.has(id))elements.set(id,{value:id==='#sensitivity'?'3':'',checked:false,style:{setProperty(){}},classList:{remove(){},add(){},toggle(){}},addEventListener(){},querySelectorAll(){return []}});return elements.get(id)};
+ const sessions=[], timers=new Map();let nextTimer=0;
+ class Speech{constructor(){sessions.push(this)}start(){this.onstart()}abort(){this.aborted=true}}
+ const context=vm.createContext({window:{SpeechRecognition:Speech,addEventListener(){}},document:{querySelector:element,documentElement:element('root'),addEventListener(){}},navigator:{},localStorage:{getItem(){return null}},setTimeout(fn){timers.set(++nextTimer,fn);return nextTimer},clearTimeout(id){timers.delete(id)},Date});
+ vm.runInContext(code,context);
+ vm.runInContext("scriptWords='welcome to post street studios adjust the shutter before recording today'.split(' '); normalizedScript=scriptWords; startVoice()",context);
+ const result=(text,final=false)=>{const item=[{transcript:text}];item.isFinal=final;return item};
+ const first=sessions[0];
+ assert.equal(first.interimResults,true);
+ first.onresult({results:[result('welcome to post street')]});
+ assert.equal(vm.runInContext('currentIndex',context),3);
+ first.onresult({results:[result('welcome to post street studios',true),result('my dog chased a squirrel')]});
+ assert.equal(vm.runInContext('currentIndex',context),3);
+ first.onresult({results:[result('welcome to post street studios',true),result('adjust the shutter before recording today',true)]});
+ assert.equal(vm.runInContext('currentIndex',context),10);
+ first.onend();
+ for(const [id,fn] of [...timers]){timers.delete(id);fn()}
+ assert.equal(sessions.length,2);
+ const second=sessions[1];
+ second.onerror({error:'not-allowed'});
+ assert.equal(vm.runInContext('voiceActive',context),false);
+ assert.equal(second.aborted,true);
+ assert.equal(timers.size,0);
+ assert.match(element('#status').textContent,/Microphone blocked/);
+ assert.ok(!code.includes("fetch('/api/token'"));
+ assert.ok(!code.includes('api.openai.com'));
+});
