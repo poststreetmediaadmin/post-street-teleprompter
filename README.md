@@ -1,14 +1,16 @@
 # Post Street Teleprompter
 
-Mobile-friendly teleprompter with horizontal mirroring enabled by default, microphone-driven following, freestyle hold, and phrase-based reacquisition. Paste a script, open the teleprompter, then start voice follow and allow microphone access. Scripts and settings are saved only in this browser. Microphone audio and script context are sent to OpenAI while voice follow is connected.
+Mobile-friendly teleprompter with horizontal mirroring enabled by default, browser speech recognition, freestyle hold, and phrase-based reacquisition. Paste a script, open the teleprompter, start voice follow and allow microphone access. Use Safari on iPhone or Chrome on Android. Browser support and speech service availability vary. Scripts and settings are saved in this browser; the browser may send audio to its speech provider and require internet access.
 
-## Vercel
+## Voice follow
 
-Import `poststreetmediaadmin/post-street-teleprompter`. Use the repository root, Other framework, and no build command. `index.html` is the app; `api/token.js` is a Node serverless function.
+No OpenAI credits or API key are required for browser voice follow. The client does not call /api/token or OpenAI. Existing OPENAI_API_KEY remains private in Vercel. The legacy POST /api/token endpoint remains server-only for potential future OpenAI support; it is unused by this interface.
 
-Set `OPENAI_API_KEY` in Vercel server environment variables. Never put it in source files or a public-prefixed variable. The app requests POST `/api/token`; GET returns 405 intentionally. Only a short-lived Realtime client secret is returned to the browser. Protect personal deployments with Vercel access controls where available; the token endpoint has no app-level login.
+Recognition uses interim results, replaces revised words, and restarts after ordinary speech-session endings. Microphone, network and permission errors show a retry message. Switching away from the app stops listening; tap Start on return.
 
-Run `npm test` for local mock endpoint and text-follow tests. These do not prove live account/model access or microphone performance. Live testing requires a deployed endpoint, server key, and an HTTPS browser with microphone permission.
+## Deployment and tests
+
+GitHub main deploys to Vercel. Use repository root, Other framework and no build command. Run npm test for mocked endpoint, phrase matching and browser recognition lifecycle tests. Real microphone performance must be tested on the target phone.
 
 ## Behavior
 
