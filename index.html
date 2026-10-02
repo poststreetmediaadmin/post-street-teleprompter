@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Post Street Teleprompter V2</title>
+<style>
+:root{
+  --font-size:58px;
+  --line-height:1.22;
+  --read-width:86vw;
+  --reading-line:46%;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:#050505;color:#f6f6f6;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+button,input,textarea{font:inherit}
+#setup{min-height:100vh;padding:18px;max-width:920px;margin:auto}
+h1{font-size:25px;margin:0 0 5px}
+.sub{opacity:.68;font-size:14px;line-height:1.45;margin:0 0 15px}
+textarea{width:100%;height:38vh;background:#111;color:#fff;border:1px solid #333;border-radius:12px;padding:14px;resize:vertical}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:11px 0}
+.control{display:flex;gap:7px;align-items:center;background:#111;padding:10px 12px;border-radius:10px}
+input[type=range]{width:clamp(90px,30vw,155px)}
+.control{max-width:100%}
+#text{overflow-wrap:anywhere}
+@media(max-width:480px){#hud button{font-size:13px;min-height:44px}#setup{padding:14px}}
+button{border:0;border-radius:10px;padding:12px 15px;background:#222;color:#fff}
+button.primary{background:#f3f3f3;color:#000;font-weight:750}
+button.danger{background:#351616}
+.small{font-size:13px;opacity:.7;line-height:1.45}
+#prompter{display:none;position:fixed;inset:0;background:#000;overflow:hidden}
+#stage{height:100%;overflow-y:auto;scrollbar-width:none;padding:42vh 7vw 52vh}
+#stage::-webkit-scrollbar{display:none}
+#text{max-width:var(--read-width);margin:auto;font-size:var(--font-size);line-height:var(--line-height);font-weight:620;letter-spacing:.01em;white-space:pre-wrap;transform-origin:center center}
+.word{opacity:.76;transition:opacity .1s}
+.word.past{opacity:.28}
+.word.current{opacity:1;text-decoration:underline;text-decoration-thickness:.07em;text-underline-offset:.14em}
+#readline{position:fixed;left:5vw;right:5vw;top:var(--reading-line);height:1px;background:rgba(255,255,255,.18);pointer-events:none}
+#status{position:fixed;z-index:5;top:max(10px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);font-size:13px;padding:7px 11px;border-radius:999px;background:rgba(30,30,30,.84);white-space:nowrap;max-width:88vw;overflow:hidden;text-overflow:ellipsis}
+#hud{position:fixed;z-index:5;left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+#hud button{background:rgba(34,34,34,.9);backdrop-filter:blur(8px);padding:10px 12px}
+#debug{position:fixed;z-index:4;left:12px;right:12px;top:52px;font-size:12px;opacity:.55;text-align:center;pointer-events:none}
+.mirrorH{transform:scaleX(-1)}
+.mirrorV{transform:scaleY(-1)}
+.mirrorHV{transform:scale(-1,-1)}
+.hidden{display:none!important}
+.badge{display:inline-block;padding:2px 7px;border-radius:99px;background:#1b1b1b;margin-left:4px}
+</style>
+</head>
+<body>
+
+<section id="setup">
+  <h1>Post Street Teleprompter V2</h1>
+  <p class="sub">Reliable voice-follow prototype using OpenAI live transcription. Production notes in square brackets can be hidden automatically.</p>
+
+  <textarea id="script" placeholder="Paste a script for this test. The later ChatGPT integration will send the current Teleprompter Draft here automatically."></textarea>
+
+  <div class="row">
+    <label class="control"><input id="stripNotes" type="checkbox" checked> Hide [PRODUCTION NOTES]</label>
+    <label class="control"><input id="mirrorH" type="checkbox" checked> Mirror horizontal</label>
+    <label class="control"><input id="mirrorV" type="checkbox"> Mirror vertical</label>
+  </div>
+
+  <div class="row">
+    <label class="control">Font <input id="fontSize" type="range" min="28" max="90" value="58"><span id="fontVal">58</span></label>
+    <label class="control">Width <input id="width" type="range" min="55" max="96" value="86"><span id="widthVal">86%</span></label>
+    <label class="control">Follow <input id="sensitivity" type="range" min="2" max="5" value="3"><span id="sensVal">3</span></label>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="open">Open in Teleprompter</button>
+    <button id="clear">Clear Saved Script</button>
+  </div>
+
+  <p class="small">
+    Follow sensitivity: 2 is more aggressive; 3 is the recommended starting point; 4–5 requires a stronger phrase match before the script moves.
+    Your OpenAI API key stays on the server. It is never placed in this web page.
+  </p>
+</section>
+
+<section id="prompter">
+  <div id="status">Ready</div>
+  <div id="debug" class="hidden"></div>
+  <div id="readline"></div>
+  <div id="stage"><div id="text"></div></div>
+  <div id="hud">
+    <button id="voice">🎙 Start Voice Follow</button>
+    <button id="back">↶ Back</button>
+    <button id="pause">⏸ Hold</button>
+    <button id="forward">Forward ↷</button>
+    <button id="full">⛶ Full Screen</button>
+    <button id="settings">⚙ Script</button>
+  </div>
+</section>
+
+<script>
+const $ = s => document.querySelector(s);
+const setup = $('#setup');
+const prompter = $('#prompter');
+const stage = $('#stage');
+const textEl = $('#text');
+const scriptEl = $('#script');
+const statusEl = $('#status');
+const debugEl = $('#debug');
+
+let scriptWords = [];
+let normalizedScript = [];
+let currentIndex = 0;
+let hold = false;
+let voiceActive = false;
+let connectionGeneration = 0;
+let connectionTimer = null;
+let pc = null;
+let dc = null;
+let mediaStream = null;
+let audioContext = null;
+let analyser = null;
+let vadTimer = null;
+let wakeLock = null;
+
+let transcriptItems = new Map();
+let completedItems = [];
+let latestTranscriptItem = null;
+let lastGoodMatchAt = 0;
+let speechStartedAt = 0;
+let lastVoiceAt = 0;
+let speechActive = false;
+
+let saved = {};
+try { saved = JSON.parse(localStorage.getItem('pssTeleprompterV2') || '{}') || {}; } catch {}
+if(saved.script) scriptEl.value = saved.script;
+for(const k of ['stripNotes','mirrorH','mirrorV']) {
+  if(typeof saved[k] === 'boolean') $('#'+k).checked = saved[k];
+}
+for(const k of ['fontSize','width','sensitivity']) {
+  if(saved[k]) $('#'+k).value = saved[k];
+}
+
+function normalizeWord(w){
+  return (w || '')
+    .toLowerCase()
+    .replace(/[“”]/g,'"')
+    .replace(/[’]/g,"'")
+    .replace(/[^a-z0-9']/g,'')
+    .trim();
+}
+
+function cleanScript(s){
+  if($('#stripNotes').checked) s = s.replace(/\[[^\]]*\]/g,' ');
+  return s.replace(/\s+/g,' ').trim();
+}
+
+function save(){
+  try { localStorage.setItem('pssTeleprompterV2', JSON.stringify({
+    script: scriptEl.value,
+    stripNotes: $('#stripNotes').checked,
+    mirrorH: $('#mirrorH').checked,
+    mirrorV: $('#mirrorV').checked,
+    fontSize: $('#fontSize').value,
+    width: $('#width').value,
+    sensitivity: $('#sensitivity').value
+  })); } catch {}
+}
+
+function applySettings(){
+  document.documentElement.style.setProperty('--font-size', $('#fontSize').value+'px');
+  document.documentElement.style.setProperty('--read-width', $('#width').value+'vw');
+  $('#fontVal').textContent = $('#fontSize').value;
+  $('#widthVal').textContent = $('#width').value+'%';
+  $('#sensVal').textContent = $('#sensitivity').value;
+
+  textEl.classList.remove('mirrorH','mirrorV','mirrorHV');
+  const h = $('#mirrorH').checked, v = $('#mirrorV').checked;
+  if(h && v) textEl.classList.add('mirrorHV');
+  else if(h) textEl.classList.add('mirrorH');
+  else if(v) textEl.classList.add('mirrorV');
+}
+
+function renderScript(){
+  const clean = cleanScript(scriptEl.value);
+  scriptWords = clean.split(/\s+/).filter(Boolean);
+  normalizedScript = scriptWords.map(normalizeWord);
+  textEl.innerHTML = '';
+  scriptWords.forEach((w,i)=>{
+    const span = document.createElement('span');
+    span.className = 'word';
+    span.dataset.i = i;
+    span.textContent = w + ' ';
+    textEl.appendChild(span);
+  });
+  currentIndex = 0;
+  updateCurrent(false);
+}
+
+function updateCurrent(scroll=true){
+  const spans = textEl.querySelectorAll('.word');
+  spans.forEach((s,i)=>{
+    s.classList.toggle('past', i < currentIndex);
+    s.classList.toggle('current', i === currentIndex);
+  });
+  const cur = spans[currentIndex];
+  if(cur && scroll){
+    const stageRect = stage.getBoundingClientRect();
+    const curRect = cur.getBoundingClientRect();
+    const target = stage.scrollTop + (curRect.top - stageRect.top) - stageRect.height * 0.46;
+    stage.scrollTo({top:Math.max(0,target), behavior:'smooth'});
+  }
+}
+
+function tokenSimilarity(a,b){
+  if(a === b) return 1;
+  if(!a || !b) return 0;
+  if(a.length >= 5 && b.length >= 5 && (a.startsWith(b) || b.startsWith(a))) return .86;
+  return 0;
+}
+
+function candidateScore(spoken, startIndex, length){
+  let exact = 0;
+  let soft = 0;
+  for(let i=0;i<length;i++){
+    const sim = tokenSimilarity(spoken[spoken.length-length+i], normalizedScript[startIndex+i]);
+    if(sim === 1) exact++;
+    soft += sim;
+  }
+  return {exact, score:soft/length};
+}
+
+function findBestMatch(spokenTokens){
+  const sensitivity = Number($('#sensitivity').value);
+  const minLen = Math.max(2, sensitivity);
+  if(spokenTokens.length < minLen || normalizedScript.length < minLen) return null;
+
+  // Prefer the last part of what was spoken. Search a small amount backward and
+  // substantially farther forward so freestyle can rejoin later in the script.
+  const left = Math.max(0, currentIndex - 28);
+  const right = normalizedScript.length - minLen;
+  let best = null;
+
+  const maxLen = Math.min(9, spokenTokens.length);
+  for(let len=maxLen; len>=minLen; len--){
+    for(let j=left; j<=right; j++){
+      if(j+len > normalizedScript.length) break;
+      // Require a distinctive phrase to reacquire far from the current line.
+      if(Math.abs(j-currentIndex) > 28 && len < Math.max(5,minLen)) continue;
+      const result = candidateScore(spokenTokens, j, len);
+
+      // Strong exact phrase, or one soft miss in a longer phrase.
+      const allowedMisses = len >= 5 ? 1 : 0;
+      const passes = result.exact >= len - allowedMisses && result.score >= (len >= 5 ? .78 : .98);
+      if(!passes) continue;
+
+      const distancePenalty = Math.min(Math.abs(j-currentIndex),100) * 0.0007;
+      const total = result.score + len*0.04 - distancePenalty;
+      if(!best || total > best.total){
+        best = {start:j, end:j+len-1, len, score:result.score, exact:result.exact, total};
+      }
+    }
+    if(best && best.len >= Math.max(4,minLen)) break;
+  }
+  return best;
+}
+
+function recentTranscriptText(currentItem=''){
+  const recent = completedItems.slice(-3).join(' ');
+  return (recent + ' ' + currentItem).trim();
+}
+
+function followTranscript(text){
+  if(hold || !scriptWords.length || !text) return;
+  const spoken = text.split(/\s+/).map(normalizeWord).filter(Boolean).slice(-32);
+  const match = findBestMatch(spoken);
+
+  if(match){
+    // Never make a huge accidental backward jump.
+    if(match.end < currentIndex - 22) return;
+    currentIndex = Math.min(scriptWords.length-1, match.end);
+    lastGoodMatchAt = Date.now();
+    updateCurrent(true);
+    statusEl.textContent = `Following • ${match.len}-word lock`;
+  } else {
+    if(Date.now() - lastGoodMatchAt > 900){
+      statusEl.textContent = 'Listening • holding while you freestyle';
+    }
+  }
+}
+
+function getTranscriptForItem(itemId){
+  return transcriptItems.get(itemId) || '';
+}
+
+function handleRealtimeEvent(event){
+  if(event.type === 'conversation.item.input_audio_transcription.delta'){
+    const id = event.item_id || 'current';
+    latestTranscriptItem=id;
+    const next = getTranscriptForItem(id) + (event.delta || '');
+    transcriptItems.set(id,next);
+    const recent = recentTranscriptText(next);
+    debugEl.textContent = recent.slice(-180);
+    followTranscript(recent);
+    return;
+  }
+
+  if(event.type === 'conversation.item.input_audio_transcription.completed'){
+    const id = event.item_id || 'current';
+    const finalText = event.transcript || getTranscriptForItem(id);
+    if(finalText && (!latestTranscriptItem || latestTranscriptItem === id)){
+      latestTranscriptItem=id;
+      completedItems.push(finalText);
+      if(completedItems.length > 5) completedItems.shift();
+      followTranscript(recentTranscriptText(''));
+    }
+    transcriptItems.delete(id);
+    return;
+  }
+
+  if(event.type === 'error' || event.type === 'conversation.item.input_audio_transcription.failed'){
+    stopVoice(false);
+    statusEl.textContent = 'Transcription failed • tap Start to reconnect';
+  }
+}
+
+async function requestWakeLock(){
+  try{
+    if('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+  }catch(e){}
+}
+
+function extractKeywords(script){
+  const defaults = ['Sony FX30','FX30','Cine EI','Flexible ISO','S-Log3','Premiere Pro','Motion Duck','Post Street Studios'];
+  const caps = [...script.matchAll(/\b[A-Z][A-Za-z0-9-]{2,}(?:\s+[A-Z][A-Za-z0-9-]{2,}){0,2}\b/g)]
+    .map(m=>m[0])
+    .filter(x=>x.length <= 60);
+  return [...new Set([...defaults,...caps])].slice(0,35);
+}
+
+async function startVoice(){
+  if(voiceActive || $('#voice').disabled) return;
+  if(!navigator.mediaDevices?.getUserMedia){
+    statusEl.textContent = 'Microphone API unavailable';
+    return;
+  }
+
+  statusEl.textContent = 'Connecting microphone…';
+  $('#voice').disabled = true;
+
+  const generation = ++connectionGeneration;
+  try{
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    await audioContext.resume();
+    if(generation !== connectionGeneration) return;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio:{
+        echoCancellation:true,
+        noiseSuppression:true,
+        autoGainControl:true
+      }
+    });
+
+    if(generation !== connectionGeneration){stream.getTracks().forEach(t=>t.stop());return;}
+    mediaStream=stream;
+    const tokenResponse = await fetch('/api/token', {method:'POST', cache:'no-store', signal:AbortSignal.timeout(20000)});
+    const tokenData = await tokenResponse.json();
+    if(generation !== connectionGeneration) return;
+    if(!tokenResponse.ok || !tokenData.value){
+      throw new Error(tokenData.error || 'Could not create OpenAI voice session');
+    }
+
+    pc = new RTCPeerConnection();
+    const peer = pc;
+    connectionTimer=setTimeout(()=>{
+      if(generation===connectionGeneration){stopVoice(false);statusEl.textContent='Connection timed out • tap Start to retry';}
+    },30000);
+    peer.addEventListener('connectionstatechange',()=>{
+      if(generation!==connectionGeneration) return;
+      if(['failed','disconnected'].includes(peer.connectionState)){stopVoice(false);statusEl.textContent='Connection lost • tap Start to reconnect';}
+    });
+    mediaStream.getTracks().forEach(track => pc.addTrack(track, mediaStream));
+
+    dc = pc.createDataChannel('oai-events');
+    dc.addEventListener('message', e => {
+      if(generation !== connectionGeneration) return;
+      try{ handleRealtimeEvent(JSON.parse(e.data)); }catch{}
+    });
+
+    dc.addEventListener('open', ()=>{
+      if(generation !== connectionGeneration) return;
+      clearTimeout(connectionTimer);
+      voiceActive = true;
+      $('#voice').disabled = false;
+      $('#voice').textContent = '🛑 Stop Voice Follow';
+      statusEl.textContent = 'Voice follow connected • start reading';
+
+      // Give the transcription model useful vocabulary from the actual script.
+      const context = cleanScript(scriptEl.value).slice(0,4200);
+      const update = {
+        type:'session.update',
+        session:{
+          type:'transcription',
+          audio:{
+            input:{
+              transcription:{
+                model:'gpt-live-transcribe',
+                prompt:'Teleprompter reading for a filmmaking and Sony FX30 video. Expected script context: ' + context,
+                keywords:extractKeywords(context),
+                languages:['en'],
+                delay:'low'
+              },
+              turn_detection:null
+            }
+          }
+        }
+      };
+      dc.send(JSON.stringify(update));
+      startClientVAD();
+    });
+
+    dc.addEventListener('close', ()=>{
+      if(generation===connectionGeneration && voiceActive){stopVoice(false);statusEl.textContent='Connection closed • tap Start to reconnect';}
+    });
+
+    const offer = await peer.createOffer();
+    if(generation !== connectionGeneration) return;
+    await peer.setLocalDescription(offer);
+
+    // Wait briefly for ICE gathering so mobile connections are more dependable.
+    if(peer.iceGatheringState !== 'complete'){
+      await new Promise((resolve)=>{
+        const timeout = setTimeout(resolve,3500);
+        const fn = ()=>{
+          if(peer.iceGatheringState === 'complete'){
+            clearTimeout(timeout);
+            peer.removeEventListener('icegatheringstatechange',fn);
+            resolve();
+          }
+        };
+        peer.addEventListener('icegatheringstatechange',fn);
+      });
+    }
+
+    if(generation !== connectionGeneration) return;
+    const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls',{
+      method:'POST',
+      body:peer.localDescription.sdp,
+      signal:AbortSignal.timeout(20000),
+      headers:{
+        Authorization:`Bearer ${tokenData.value}`,
+        'Content-Type':'application/sdp'
+      }
+    });
+
+    if(!sdpResponse.ok) throw new Error('OpenAI connection failed (' + sdpResponse.status + '). Please retry.');
+    const answer = {type:'answer', sdp:await sdpResponse.text()};
+    if(generation !== connectionGeneration) return;
+    await peer.setRemoteDescription(answer);
+
+  }catch(err){
+    if(generation !== connectionGeneration) return;
+    statusEl.textContent = err.name === 'NotAllowedError' ? 'Microphone blocked • allow microphone access and retry' : (err.message || 'Could not start voice follow');
+    $('#voice').disabled = false;
+    cleanupVoice();
+  }
+}
+
+function startClientVAD(){
+  if(vadTimer) clearInterval(vadTimer);
+  const source = audioContext.createMediaStreamSource(mediaStream);
+  analyser = audioContext.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = .45;
+  source.connect(analyser);
+
+  const data = new Uint8Array(analyser.fftSize);
+  const SILENCE_MS = 680;
+  const MIN_TURN_MS = 700;
+  const RMS_THRESHOLD = 0.026;
+
+  vadTimer = setInterval(()=>{
+    if(!analyser || !dc || dc.readyState !== 'open') return;
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for(const v of data){
+      const n = (v-128)/128;
+      sum += n*n;
+    }
+    const rms = Math.sqrt(sum/data.length);
+    const now = Date.now();
+
+    if(rms > RMS_THRESHOLD){
+      lastVoiceAt = now;
+      if(!speechActive){
+        speechActive = true;
+        speechStartedAt = now;
+      }
+    }else if(speechActive && (now-lastVoiceAt) > SILENCE_MS && (now-speechStartedAt) > MIN_TURN_MS){
+      // gpt-live-transcribe needs us to mark the end of the spoken turn.
+      try{ dc.send(JSON.stringify({type:'input_audio_buffer.commit'})); }catch(e){}
+      speechActive = false;
+    }
+  },80);
+}
+
+function stopClientVAD(){
+  if(vadTimer){ clearInterval(vadTimer); vadTimer=null; }
+  if(audioContext){ try{audioContext.close();}catch(e){} audioContext=null; }
+  analyser=null;
+  speechActive=false;
+}
+
+function cleanupVoice(){
+  connectionGeneration++;
+  clearTimeout(connectionTimer);
+  connectionTimer=null;
+  voiceActive=false;
+  $('#voice').disabled=false;
+  stopClientVAD();
+  if(mediaStream){ mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
+  if(dc){ try{dc.close();}catch(e){} dc=null; }
+  if(pc){ try{pc.close();}catch(e){} pc=null; }
+  voiceActive=false;
+  transcriptItems.clear();
+  completedItems=[];
+  latestTranscriptItem=null;
+  $('#voice').textContent = '🎙 Start Voice Follow';
+}
+
+function stopVoice(updateStatus=true){
+  cleanupVoice();
+  if(updateStatus) statusEl.textContent = 'Voice follow stopped';
+}
+
+$('#open').onclick = ()=>{
+  if(!scriptEl.value.trim()) return;
+  hold=false;
+  $('#pause').textContent='⏸ Hold';
+  save(); applySettings(); renderScript();
+  setup.style.display='none';
+  prompter.style.display='block';
+  updateCurrent(true);
+  lastGoodMatchAt=Date.now();
+  requestWakeLock();
+};
+
+$('#settings').onclick = ()=>{
+  stopVoice(false);
+  if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null;}
+  prompter.style.display='none';
+  setup.style.display='block';
+  save();
+};
+
+$('#voice').onclick = ()=>{
+  if(voiceActive) stopVoice();
+  else startVoice();
+};
+
+$('#pause').onclick = ()=>{
+  hold = !hold;
+  $('#pause').textContent = hold ? '▶ Resume' : '⏸ Hold';
+  statusEl.textContent = hold ? 'Held manually' : (voiceActive ? 'Listening…' : 'Ready');
+};
+
+$('#back').onclick = ()=>{
+  currentIndex=Math.max(0,currentIndex-14);
+  updateCurrent(true);
+};
+
+$('#forward').onclick = ()=>{
+  currentIndex=Math.min(scriptWords.length-1,currentIndex+14);
+  updateCurrent(true);
+};
+
+$('#full').onclick = async()=>{
+  try{
+    if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
+    else await document.exitFullscreen();
+  }catch(e){}
+};
+
+$('#clear').onclick = ()=>{
+  try{localStorage.removeItem('pssTeleprompterV2');}catch{}
+  scriptEl.value='';
+};
+
+for(const id of ['fontSize','width','sensitivity','stripNotes','mirrorH','mirrorV']){
+  $('#'+id).addEventListener('input',()=>{applySettings();save();});
+}
+scriptEl.addEventListener('input',save);
+
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState === 'visible' && prompter.style.display === 'block') requestWakeLock();
+});
+
+window.addEventListener('pagehide',()=>cleanupVoice());
+applySettings();
+</script>
+</body>
+</html>
