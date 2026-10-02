@@ -74,7 +74,7 @@ button.danger{background:#351616}
   </div>
 
   <p class="small">
-    Follow sensitivity: 2 is more aggressive; 3 is the recommended starting point; 4–5 requires a stronger phrase match before the script moves.
+    Voice follow stays near your current line to prevent repeated phrases from skipping ahead. Use Back or Forward for deliberate jumps. Follow sensitivity: 2 is more aggressive; 3 is the recommended starting point; 4–5 requires a stronger phrase match before the script moves.
     Use Safari on iPhone or Chrome on Android. Allow microphone access when asked. Your browser may send audio to its speech service; an internet connection may be required.
   </p>
 </section>
@@ -221,18 +221,17 @@ function findBestMatch(spokenTokens){
   const minLen = Math.max(2, sensitivity);
   if(spokenTokens.length < minLen || normalizedScript.length < minLen) return null;
 
-  // Prefer the last part of what was spoken. Search a small amount backward and
-  // substantially farther forward so freestyle can rejoin later in the script.
-  const left = Math.max(0, currentIndex - 28);
-  const right = normalizedScript.length - minLen;
+  // Stay near the reading position. Repeated phrases elsewhere must never
+  // move the cursor across the script; Back/Forward handles deliberate skips.
+  const left = Math.max(0, currentIndex - 9);
+  const right = Math.min(normalizedScript.length - minLen, currentIndex + 12);
   let best = null;
 
   const maxLen = Math.min(9, spokenTokens.length);
   for(let len=maxLen; len>=minLen; len--){
     for(let j=left; j<=right; j++){
       if(j+len > normalizedScript.length) break;
-      // Require a distinctive phrase to reacquire far from the current line.
-      if(Math.abs(j-currentIndex) > 28 && len < Math.max(5,minLen)) continue;
+      if(j+len-1 > currentIndex+16 || j+len-1 < currentIndex) continue;
       const result = candidateScore(spokenTokens, j, len);
 
       // Strong exact phrase, or one soft miss in a longer phrase.
@@ -240,13 +239,13 @@ function findBestMatch(spokenTokens){
       const passes = result.exact >= len - allowedMisses && result.score >= (len >= 5 ? .78 : .98);
       if(!passes) continue;
 
-      const distancePenalty = Math.min(Math.abs(j-currentIndex),100) * 0.0007;
-      const total = result.score + len*0.04 - distancePenalty;
+      const distancePenalty = Math.abs(j+len-1-currentIndex) * 0.025;
+      const total = result.score + (result.exact === len ? 0.3 : 0) + len*0.04 - distancePenalty;
       if(!best || total > best.total){
         best = {start:j, end:j+len-1, len, score:result.score, exact:result.exact, total};
       }
     }
-    if(best && best.len >= Math.max(4,minLen)) break;
+
   }
   return best;
 }
