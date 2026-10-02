@@ -19,14 +19,14 @@ test('token endpoint rejects GET and never returns server key',async()=>{
  res=response();await handler({method:'POST'},res);assert.equal(res.code,502);assert.ok(!JSON.stringify(res.body).includes('test-server-secret'));
  }finally{global.fetch=oldFetch;if(old===undefined)delete process.env.OPENAI_API_KEY;else process.env.OPENAI_API_KEY=old;}
 });
-test('follows script, holds for freestyle, reacquires distant phrase',()=>{
+test('follows locally, holds freestyle, rejects distant phrases',()=>{
  const start=code.indexOf('function tokenSimilarity');const end=code.indexOf('function recentTranscriptText');
  const context=vm.createContext({normalizedScript:('welcome to post street studios '+Array(250).fill('filler').join(' ')+' adjust the shutter before recording today').split(' '),currentIndex:0,$:()=>({value:'3'})});
  vm.runInContext(code.slice(start,end),context);
  assert.equal(vm.runInContext("findBestMatch(['welcome','to','post','street','studios']).end",context),4);
  assert.equal(vm.runInContext("findBestMatch(['my','dog','chased','a','squirrel'])",context),null);
  assert.equal(vm.runInContext("findBestMatch(['shutter','before','recording'])",context),null);
- assert.ok(vm.runInContext("findBestMatch(['adjust','the','shutter','before','recording','today']).end",context)>250);
+ assert.equal(vm.runInContext("findBestMatch(['adjust','the','shutter','before','recording','today'])",context),null);
 });
 
 test('browser speech follows revisions, holds freestyle, restarts and stops safely',()=>{
@@ -58,3 +58,13 @@ test('browser speech follows revisions, holds freestyle, restarts and stops safe
  assert.ok(!code.includes("fetch('/api/token'"));
  assert.ok(!code.includes('api.openai.com'));
 });
+
+ test('repeated phrases cannot jump ahead or ratchet on duplicate results',()=>{
+ const context=vm.createContext({normalizedScript:('we are going to set the camera '+Array(40).fill('filler').join(' ')+' today we are going to set the camera').split(' '),currentIndex:0,$:()=>({value:'2'})});
+ vm.runInContext(code.slice(code.indexOf('function tokenSimilarity'),code.indexOf('function recentTranscriptText')),context);
+ for(let i=0;i<10;i++){
+  vm.runInContext("const_unused = findBestMatch('today we are going to set the camera'.split(' ')); if(const_unused) currentIndex=const_unused.end",context);
+  assert.equal(vm.runInContext('currentIndex',context),6);
+ }
+ assert.equal(vm.runInContext("findBestMatch(['random','freestyle','words'])",context),null);
+ });
