@@ -52,9 +52,9 @@ button.danger{background:#351616}
 
 <section id="setup">
   <h1>Post Street Teleprompter V2</h1>
-  <p class="sub">Reliable voice-follow prototype using OpenAI live transcription. Production notes in square brackets can be hidden automatically.</p>
+  <p class="sub">Voice follow using your browser’s speech recognition. No OpenAI credits needed. Production notes in square brackets can be hidden automatically.</p>
 
-  <textarea id="script" placeholder="Paste a script for this test. The later ChatGPT integration will send the current Teleprompter Draft here automatically."></textarea>
+  <textarea id="script" placeholder="Paste your script here, then open the teleprompter."></textarea>
 
   <div class="row">
     <label class="control"><input id="stripNotes" type="checkbox" checked> Hide [PRODUCTION NOTES]</label>
@@ -75,7 +75,7 @@ button.danger{background:#351616}
 
   <p class="small">
     Follow sensitivity: 2 is more aggressive; 3 is the recommended starting point; 4–5 requires a stronger phrase match before the script moves.
-    Your OpenAI API key stays on the server. It is never placed in this web page.
+    Use Safari on iPhone or Chrome on Android. Allow microphone access when asked. Your browser may send audio to its speech service; an internet connection may be required.
   </p>
 </section>
 
@@ -109,23 +109,13 @@ let normalizedScript = [];
 let currentIndex = 0;
 let hold = false;
 let voiceActive = false;
-let connectionGeneration = 0;
-let connectionTimer = null;
-let pc = null;
-let dc = null;
-let mediaStream = null;
-let audioContext = null;
-let analyser = null;
-let vadTimer = null;
+let recognition = null;
+let restartTimer = null;
+let startupTimer = null;
 let wakeLock = null;
-
-let transcriptItems = new Map();
 let completedItems = [];
-let latestTranscriptItem = null;
 let lastGoodMatchAt = 0;
-let speechStartedAt = 0;
-let lastVoiceAt = 0;
-let speechActive = false;
+let emptyRestarts = 0;
 
 let saved = {};
 try { saved = JSON.parse(localStorage.getItem('pssTeleprompterV2') || '{}') || {}; } catch {}
@@ -285,242 +275,111 @@ function followTranscript(text){
   }
 }
 
-function getTranscriptForItem(itemId){
-  return transcriptItems.get(itemId) || '';
-}
-
-function handleRealtimeEvent(event){
-  if(event.type === 'conversation.item.input_audio_transcription.delta'){
-    const id = event.item_id || 'current';
-    latestTranscriptItem=id;
-    const next = getTranscriptForItem(id) + (event.delta || '');
-    transcriptItems.set(id,next);
-    const recent = recentTranscriptText(next);
-    debugEl.textContent = recent.slice(-180);
-    followTranscript(recent);
-    return;
-  }
-
-  if(event.type === 'conversation.item.input_audio_transcription.completed'){
-    const id = event.item_id || 'current';
-    const finalText = event.transcript || getTranscriptForItem(id);
-    if(finalText && (!latestTranscriptItem || latestTranscriptItem === id)){
-      latestTranscriptItem=id;
-      completedItems.push(finalText);
-      if(completedItems.length > 5) completedItems.shift();
-      followTranscript(recentTranscriptText(''));
-    }
-    transcriptItems.delete(id);
-    return;
-  }
-
-  if(event.type === 'error' || event.type === 'conversation.item.input_audio_transcription.failed'){
-    stopVoice(false);
-    statusEl.textContent = 'Transcription failed • tap Start to reconnect';
-  }
-}
-
 async function requestWakeLock(){
   try{
     if('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
   }catch(e){}
 }
 
-function extractKeywords(script){
-  const defaults = ['Sony FX30','FX30','Cine EI','Flexible ISO','S-Log3','Premiere Pro','Motion Duck','Post Street Studios'];
-  const caps = [...script.matchAll(/\b[A-Z][A-Za-z0-9-]{2,}(?:\s+[A-Z][A-Za-z0-9-]{2,}){0,2}\b/g)]
-    .map(m=>m[0])
-    .filter(x=>x.length <= 60);
-  return [...new Set([...defaults,...caps])].slice(0,35);
-}
-
-async function startVoice(){
-  if(voiceActive || $('#voice').disabled) return;
-  if(!navigator.mediaDevices?.getUserMedia){
-    statusEl.textContent = 'Microphone API unavailable';
+function startVoice(){
+  if(voiceActive) return;
+  const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!Speech){
+    statusEl.textContent = 'Voice unavailable • use Safari on iPhone or Chrome on Android';
     return;
   }
-
-  statusEl.textContent = 'Connecting microphone…';
-  $('#voice').disabled = true;
-
-  const generation = ++connectionGeneration;
-  try{
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    await audioContext.resume();
-    if(generation !== connectionGeneration) return;
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio:{
-        echoCancellation:true,
-        noiseSuppression:true,
-        autoGainControl:true
-      }
-    });
-
-    if(generation !== connectionGeneration){stream.getTracks().forEach(t=>t.stop());return;}
-    mediaStream=stream;
-    const tokenResponse = await fetch('/api/token', {method:'POST', cache:'no-store', signal:AbortSignal.timeout(20000)});
-    const tokenData = await tokenResponse.json();
-    if(generation !== connectionGeneration) return;
-    if(!tokenResponse.ok || !tokenData.value){
-      throw new Error(tokenData.error || 'Could not create OpenAI voice session');
-    }
-
-    pc = new RTCPeerConnection();
-    const peer = pc;
-    connectionTimer=setTimeout(()=>{
-      if(generation===connectionGeneration){stopVoice(false);statusEl.textContent='Connection timed out • tap Start to retry';}
-    },30000);
-    peer.addEventListener('connectionstatechange',()=>{
-      if(generation!==connectionGeneration) return;
-      if(['failed','disconnected'].includes(peer.connectionState)){stopVoice(false);statusEl.textContent='Connection lost • tap Start to reconnect';}
-    });
-    mediaStream.getTracks().forEach(track => pc.addTrack(track, mediaStream));
-
-    dc = pc.createDataChannel('oai-events');
-    dc.addEventListener('message', e => {
-      if(generation !== connectionGeneration) return;
-      try{ handleRealtimeEvent(JSON.parse(e.data)); }catch{}
-    });
-
-    dc.addEventListener('open', ()=>{
-      if(generation !== connectionGeneration) return;
-      clearTimeout(connectionTimer);
-      voiceActive = true;
-      $('#voice').disabled = false;
-      $('#voice').textContent = '🛑 Stop Voice Follow';
-      statusEl.textContent = 'Voice follow connected • start reading';
-
-      // Give the transcription model useful vocabulary from the actual script.
-      const context = cleanScript(scriptEl.value).slice(0,4200);
-      const update = {
-        type:'session.update',
-        session:{
-          type:'transcription',
-          audio:{
-            input:{
-              transcription:{
-                model:'gpt-live-transcribe',
-                prompt:'Teleprompter reading for a filmmaking and Sony FX30 video. Expected script context: ' + context,
-                keywords:extractKeywords(context),
-                languages:['en'],
-                delay:'low'
-              },
-              turn_detection:null
-            }
-          }
-        }
-      };
-      dc.send(JSON.stringify(update));
-      startClientVAD();
-    });
-
-    dc.addEventListener('close', ()=>{
-      if(generation===connectionGeneration && voiceActive){stopVoice(false);statusEl.textContent='Connection closed • tap Start to reconnect';}
-    });
-
-    const offer = await peer.createOffer();
-    if(generation !== connectionGeneration) return;
-    await peer.setLocalDescription(offer);
-
-    // Wait briefly for ICE gathering so mobile connections are more dependable.
-    if(peer.iceGatheringState !== 'complete'){
-      await new Promise((resolve)=>{
-        const timeout = setTimeout(resolve,3500);
-        const fn = ()=>{
-          if(peer.iceGatheringState === 'complete'){
-            clearTimeout(timeout);
-            peer.removeEventListener('icegatheringstatechange',fn);
-            resolve();
-          }
-        };
-        peer.addEventListener('icegatheringstatechange',fn);
-      });
-    }
-
-    if(generation !== connectionGeneration) return;
-    const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls',{
-      method:'POST',
-      body:peer.localDescription.sdp,
-      signal:AbortSignal.timeout(20000),
-      headers:{
-        Authorization:`Bearer ${tokenData.value}`,
-        'Content-Type':'application/sdp'
-      }
-    });
-
-    if(!sdpResponse.ok) throw new Error('OpenAI connection failed (' + sdpResponse.status + '). Please retry.');
-    const answer = {type:'answer', sdp:await sdpResponse.text()};
-    if(generation !== connectionGeneration) return;
-    await peer.setRemoteDescription(answer);
-
-  }catch(err){
-    if(generation !== connectionGeneration) return;
-    statusEl.textContent = err.name === 'NotAllowedError' ? 'Microphone blocked • allow microphone access and retry' : (err.message || 'Could not start voice follow');
-    $('#voice').disabled = false;
-    cleanupVoice();
-  }
+  voiceActive = true;
+  completedItems = [];
+  emptyRestarts = 0;
+  $('#voice').textContent = '🛑 Stop Voice Follow';
+  beginRecognition();
 }
 
-function startClientVAD(){
-  if(vadTimer) clearInterval(vadTimer);
-  const source = audioContext.createMediaStreamSource(mediaStream);
-  analyser = audioContext.createAnalyser();
-  analyser.fftSize = 512;
-  analyser.smoothingTimeConstant = .45;
-  source.connect(analyser);
-
-  const data = new Uint8Array(analyser.fftSize);
-  const SILENCE_MS = 680;
-  const MIN_TURN_MS = 700;
-  const RMS_THRESHOLD = 0.026;
-
-  vadTimer = setInterval(()=>{
-    if(!analyser || !dc || dc.readyState !== 'open') return;
-    analyser.getByteTimeDomainData(data);
-    let sum = 0;
-    for(const v of data){
-      const n = (v-128)/128;
-      sum += n*n;
+function beginRecognition(){
+  if(!voiceActive) return;
+  const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const session = new Speech();
+  recognition = session;
+  session.lang = 'en-US';
+  session.continuous = true;
+  session.interimResults = true;
+  session.maxAlternatives = 1;
+  let finalText = '';
+  let receivedResult = false;
+  statusEl.textContent = 'Starting microphone • allow access if asked';
+  const fail = message => {
+    if(recognition !== session) return;
+    stopVoice(false);
+    statusEl.textContent = message;
+  };
+  session.onstart = () => {
+    if(recognition !== session) return;
+    clearTimeout(startupTimer);
+    statusEl.textContent = hold ? 'Held manually' : 'Listening • start reading';
+  };
+  session.onresult = event => {
+    if(recognition !== session || !voiceActive) return;
+    receivedResult = true;
+    emptyRestarts = 0;
+    // Rebuild current results: interim words are revisions, not new additions.
+    const words = [];
+    const finals = [];
+    for(let i=0; i<event.results.length; i++){
+      const value = event.results[i][0].transcript;
+      words.push(value);
+      if(event.results[i].isFinal) finals.push(value);
     }
-    const rms = Math.sqrt(sum/data.length);
-    const now = Date.now();
-
-    if(rms > RMS_THRESHOLD){
-      lastVoiceAt = now;
-      if(!speechActive){
-        speechActive = true;
-        speechStartedAt = now;
-      }
-    }else if(speechActive && (now-lastVoiceAt) > SILENCE_MS && (now-speechStartedAt) > MIN_TURN_MS){
-      // gpt-live-transcribe needs us to mark the end of the spoken turn.
-      try{ dc.send(JSON.stringify({type:'input_audio_buffer.commit'})); }catch(e){}
-      speechActive = false;
+    finalText = finals.join(' ');
+    const recent = recentTranscriptText(words.join(' '));
+    debugEl.textContent = recent.slice(-180);
+    followTranscript(recent);
+  };
+  session.onerror = event => {
+    if(recognition !== session) return;
+    if(event.error === 'no-speech') return; // onend restarts after silence.
+    const messages = {
+      'not-allowed':'Microphone blocked • allow access in browser settings, then tap Start',
+      'service-not-allowed':'Speech service blocked • try Safari on iPhone or Chrome on Android',
+      'audio-capture':'No microphone available • check your microphone and tap Start',
+      'network':'Speech connection lost • check internet and tap Start',
+      'language-not-supported':'English speech recognition unavailable in this browser',
+      'aborted':'Voice interrupted • tap Start to resume'
+    };
+    fail(messages[event.error] || 'Speech recognition stopped • tap Start to retry');
+  };
+  session.onend = () => {
+    if(recognition !== session || !voiceActive) return;
+    clearTimeout(startupTimer);
+    recognition = null;
+    if(finalText){
+      completedItems.push(finalText.split(/\s+/).slice(-32).join(' '));
+      completedItems = completedItems.slice(-3);
     }
-  },80);
-}
-
-function stopClientVAD(){
-  if(vadTimer){ clearInterval(vadTimer); vadTimer=null; }
-  if(audioContext){ try{audioContext.close();}catch(e){} audioContext=null; }
-  analyser=null;
-  speechActive=false;
+    if(!receivedResult && ++emptyRestarts > 4){
+      stopVoice(false);
+      statusEl.textContent = 'No speech detected • tap Start when ready';
+      return;
+    }
+    statusEl.textContent = hold ? 'Held manually' : 'Listening • reconnecting microphone';
+    restartTimer = setTimeout(beginRecognition, 350);
+  };
+  startupTimer = setTimeout(()=>fail('Microphone did not start • check permissions and tap Start'),20000);
+  try { session.start(); }
+  catch { fail('Could not start microphone • tap Start to retry'); }
 }
 
 function cleanupVoice(){
-  connectionGeneration++;
-  clearTimeout(connectionTimer);
-  connectionTimer=null;
-  voiceActive=false;
-  $('#voice').disabled=false;
-  stopClientVAD();
-  if(mediaStream){ mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
-  if(dc){ try{dc.close();}catch(e){} dc=null; }
-  if(pc){ try{pc.close();}catch(e){} pc=null; }
-  voiceActive=false;
-  transcriptItems.clear();
-  completedItems=[];
-  latestTranscriptItem=null;
+  voiceActive = false;
+  clearTimeout(restartTimer);
+  clearTimeout(startupTimer);
+  const session = recognition;
+  recognition = null;
+  if(session){
+    session.onstart = session.onresult = session.onerror = session.onend = null;
+    try { session.abort(); } catch {}
+  }
+  completedItems = [];
+  $('#voice').disabled = false;
   $('#voice').textContent = '🎙 Start Voice Follow';
 }
 
@@ -588,6 +447,10 @@ for(const id of ['fontSize','width','sensitivity','stripNotes','mirrorH','mirror
 scriptEl.addEventListener('input',save);
 
 document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState === 'hidden' && voiceActive){
+    stopVoice(false);
+    statusEl.textContent = 'Voice paused in background • tap Start to resume';
+  }
   if(document.visibilityState === 'visible' && prompter.style.display === 'block') requestWakeLock();
 });
 
