@@ -41,6 +41,10 @@ button.danger{background:#351616}
 #hud{position:fixed;z-index:5;left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
 #hud button{background:rgba(34,34,34,.9);backdrop-filter:blur(8px);padding:10px 12px}
 #debug{position:fixed;z-index:4;left:12px;right:12px;top:52px;font-size:12px;opacity:.55;text-align:center;pointer-events:none}
+#cameraPreview{position:fixed;z-index:6;top:max(48px,env(safe-area-inset-top));right:12px;width:clamp(110px,28vw,180px);background:#161616;border:1px solid #555;border-radius:12px;overflow:hidden;box-shadow:0 3px 18px #0008}
+#cameraVideo{display:block;width:100%;aspect-ratio:3/4;object-fit:cover;transform:scaleX(-1)}
+#cameraPreview button{width:100%;padding:8px 4px;min-height:44px;font-size:12px;border-radius:0}
+#cameraMessage{font-size:13px;color:#ddd;line-height:1.4}
 .mirrorH{transform:scaleX(-1)}
 .mirrorV{transform:scaleY(-1)}
 .mirrorHV{transform:scale(-1,-1)}
@@ -73,6 +77,7 @@ button.danger{background:#351616}
     <button id="clear">Clear Saved Script</button>
   </div>
 
+  <p id="cameraMessage" role="status" aria-live="polite"></p>
   <p class="small">
     Voice follow stays near your current line to prevent repeated phrases from skipping ahead. Use Back or Forward for deliberate jumps. Follow sensitivity: 2 is more aggressive; 3 is the recommended starting point; 4–5 requires a stronger phrase match before the script moves.
     Use Safari on iPhone or Chrome on Android. Allow microphone access when asked. Your browser may send audio to its speech service; an internet connection may be required.
@@ -84,12 +89,18 @@ button.danger{background:#351616}
   <div id="debug" class="hidden"></div>
   <div id="readline"></div>
   <div id="stage"><div id="text"></div></div>
+  <aside id="cameraPreview" class="hidden" aria-label="Camera preview">
+    <video id="cameraVideo" autoplay muted playsinline></video>
+    <button id="cameraReadable">Unmirror script</button>
+    <button id="cameraClose" aria-label="Close camera preview">Close camera ×</button>
+  </aside>
   <div id="hud">
     <button id="voice">🎙 Start Voice Follow</button>
     <button id="back">↶ Back</button>
     <button id="pause">⏸ Hold</button>
     <button id="forward">Forward ↷</button>
     <button id="full">⛶ Full Screen</button>
+    <button id="camera" aria-pressed="false">Camera</button>
     <button id="settings">⚙ Script</button>
   </div>
 </section>
@@ -387,6 +398,57 @@ function stopVoice(updateStatus=true){
   if(updateStatus) statusEl.textContent = 'Voice follow stopped';
 }
 
+let cameraStream = null;
+let cameraGeneration = 0;
+let cameraPending = false;
+function stopCamera(){
+  cameraGeneration++;
+  cameraPending = false;
+  if(cameraStream) cameraStream.getTracks().forEach(track=>track.stop());
+  cameraStream = null;
+  $('#cameraVideo').srcObject = null;
+  $('#cameraPreview').classList.add('hidden');
+  $('#camera').textContent = 'Camera';
+  $('#camera').setAttribute('aria-pressed','false');
+}
+async function toggleCamera(){
+  if(cameraStream || cameraPending){stopCamera();return;}
+  if(!navigator.mediaDevices?.getUserMedia){
+    statusEl.textContent = 'Camera unavailable in this browser';return;
+  }
+  const generation = ++cameraGeneration;
+  cameraPending = true;
+  $('#camera').textContent = 'Cancel camera';
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'user',width:{ideal:480},height:{ideal:640}},audio:false
+    });
+    if(generation !== cameraGeneration){stream.getTracks().forEach(t=>t.stop());return;}
+    cameraStream = stream;
+    $('#cameraVideo').srcObject = stream;
+    await $('#cameraVideo').play();
+    if(generation !== cameraGeneration) return;
+    cameraPending = false;
+    $('#cameraPreview').classList.remove('hidden');
+    $('#camera').textContent = 'Camera off';
+    $('#camera').setAttribute('aria-pressed','true');
+    $('#cameraMessage').textContent = 'Camera is a live preview only. No video is recorded or uploaded.';
+  }catch(error){
+    if(generation !== cameraGeneration) return;
+    stopCamera();
+    statusEl.textContent = error.name === 'NotAllowedError'
+      ? 'Camera blocked • allow camera access in browser settings'
+      : 'Camera unavailable • close other camera apps and retry';
+  }
+}
+$('#camera').onclick = toggleCamera;
+$('#cameraClose').onclick = stopCamera;
+$('#cameraReadable').onclick = ()=>{
+  $('#mirrorH').checked = false;
+  $('#mirrorV').checked = false;
+  applySettings();save();
+};
+
 $('#open').onclick = ()=>{
   if(!scriptEl.value.trim()) return;
   hold=false;
@@ -400,6 +462,7 @@ $('#open').onclick = ()=>{
 };
 
 $('#settings').onclick = ()=>{
+  stopCamera();
   stopVoice(false);
   if(wakeLock){wakeLock.release().catch(()=>{});wakeLock=null;}
   prompter.style.display='none';
@@ -446,6 +509,7 @@ for(const id of ['fontSize','width','sensitivity','stripNotes','mirrorH','mirror
 scriptEl.addEventListener('input',save);
 
 document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState === 'hidden') stopCamera();
   if(document.visibilityState === 'hidden' && voiceActive){
     stopVoice(false);
     statusEl.textContent = 'Voice paused in background • tap Start to resume';
@@ -453,7 +517,7 @@ document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState === 'visible' && prompter.style.display === 'block') requestWakeLock();
 });
 
-window.addEventListener('pagehide',()=>cleanupVoice());
+window.addEventListener('pagehide',()=>{cleanupVoice();stopCamera();});
 applySettings();
 </script>
 </body>
