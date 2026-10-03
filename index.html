@@ -45,6 +45,16 @@ button.danger{background:#351616}
 #cameraVideo{display:block;width:100%;aspect-ratio:3/4;object-fit:cover;transform:scaleX(-1)}
 #cameraPreview button{width:100%;padding:8px 4px;min-height:44px;font-size:12px;border-radius:0}
 #cameraMessage{font-size:13px;color:#ddd;line-height:1.4}
+#prompter.phoneMode #cameraPreview{top:max(8px,env(safe-area-inset-top));left:50%;right:auto;transform:translateX(-50%);width:76px}
+#prompter.phoneMode #cameraVideo{aspect-ratio:1;}
+#prompter.phoneMode #cameraPreview button{display:none}
+#prompter.phoneMode #stage{padding:110px 8px 85vh}
+#prompter.phoneMode #text{max-width:min(76vw,320px);font-size:clamp(28px,var(--font-size),42px);transform:none}
+#prompter.phoneMode #readline{top:110px;left:calc(50% - 100px);right:calc(50% - 100px)}
+#prompter.phoneMode #status{top:auto;bottom:145px;font-size:11px}
+#takes{position:fixed;z-index:8;left:8px;bottom:8px;max-width:calc(100vw - 16px);max-height:35vh;overflow:auto;background:#202020;border:1px solid #777;border-radius:10px;padding:12px}
+#takes a{color:#fff;display:block;padding:10px}
+#recordState{color:#ff9b9b;font-size:13px}
 .mirrorH{transform:scaleX(-1)}
 .mirrorV{transform:scaleY(-1)}
 .mirrorHV{transform:scale(-1,-1)}
@@ -95,6 +105,10 @@ button.danger{background:#351616}
     <button id="cameraClose" aria-label="Close camera preview">Close camera ×</button>
   </aside>
   <div id="hud">
+    <button id="phoneMode" aria-pressed="false">Phone layout</button>
+    <button id="record">● Record</button>
+    <button id="showTakes">Saved takes (0)</button>
+    <span id="recordState" role="status"></span>
     <button id="voice">🎙 Start Voice Follow</button>
     <button id="back">↶ Back</button>
     <button id="pause">⏸ Hold</button>
@@ -105,6 +119,11 @@ button.danger{background:#351616}
   </div>
 </section>
 
+<aside id="takes" class="hidden" aria-label="Recorded takes">
+  <button id="closeTakes">Close</button>
+  <p class="small">Save each take before closing or refreshing this page. Videos stay in this tab until downloaded.</p>
+  <div id="takeLinks"></div>
+</aside>
 <script>
 const $ = s => document.querySelector(s);
 const setup = $('#setup');
@@ -204,7 +223,7 @@ function updateCurrent(scroll=true){
   if(cur && scroll){
     const stageRect = stage.getBoundingClientRect();
     const curRect = cur.getBoundingClientRect();
-    const target = stage.scrollTop + (curRect.top - stageRect.top) - stageRect.height * 0.46;
+    const target = stage.scrollTop + (curRect.top - stageRect.top) - (prompter.classList.contains('phoneMode') ? 110 : stageRect.height * 0.46);
     stage.scrollTo({top:Math.max(0,target), behavior:'smooth'});
   }
 }
@@ -398,10 +417,85 @@ function stopVoice(updateStatus=true){
   if(updateStatus) statusEl.textContent = 'Voice follow stopped';
 }
 
+let recorder = null;
+let recordingAudio = null;
+let recordPending = false;
+let recordGeneration = 0;
+let takeCount = 0;
+let recordingTimer = null;
+function stopRecording(){
+  recordGeneration++;
+  recordPending = false;
+  if(recorder && recorder.state !== 'inactive') recorder.stop();
+  if(recordingAudio) recordingAudio.getTracks().forEach(t=>t.stop());
+  recordingAudio = null;
+  clearInterval(recordingTimer);
+  $('#record').textContent = '● Record';
+}
+async function startRecording(){
+  if(recordPending || (recorder && recorder.state !== 'inactive')){stopRecording();return;}
+  if(!window.MediaRecorder){statusEl.textContent='Recording unavailable in this browser';return;}
+  if(!cameraStream){await toggleCamera();if(!cameraStream)return;}
+  const generation=++recordGeneration;
+  recordPending=true;
+  $('#record').textContent='Cancel recording';
+  try{
+    const audio=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+    if(generation!==recordGeneration){audio.getTracks().forEach(t=>t.stop());return;}
+    recordingAudio=audio;
+    const stream=new MediaStream([...cameraStream.getVideoTracks(),...audio.getAudioTracks()]);
+    const mime=['video/mp4','video/webm;codecs=vp8,opus','video/webm'].find(t=>MediaRecorder.isTypeSupported(t));
+    const active=new MediaRecorder(stream,mime?{mimeType:mime}:{});
+    recorder=active;
+    const chunks=[];
+    active.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+    active.onstop=()=>{
+      if(recorder===active){recorder=null;stopRecording();}
+      if(!chunks.length){$('#recordState').textContent='No recording captured';return;}
+      const blob=new Blob(chunks,{type:active.mimeType||chunks[0].type});
+      const link=document.createElement('a');
+      link.href=URL.createObjectURL(blob);
+      link.download='post-street-take-'+(++takeCount)+(blob.type.includes('mp4')?'.mp4':'.webm');
+      link.textContent='Save take '+takeCount+' ('+(blob.size/1048576).toFixed(1)+' MB)';
+      $('#takeLinks').appendChild(link);
+      $('#showTakes').textContent='Saved takes ('+takeCount+')';
+      $('#takes').classList.remove('hidden');
+      $('#recordState').textContent='Take ready to save';
+    };
+    active.onerror=()=>{stopRecording();$('#recordState').textContent='Recording interrupted • save any captured take';};
+    active.start(1000);
+    recordPending=false;
+    const started=Date.now();
+    $('#record').textContent='■ Stop recording';
+    $('#recordState').textContent='● Recording 0:00';
+    recordingTimer=setInterval(()=>{
+      const seconds=Math.floor((Date.now()-started)/1000);
+      $('#recordState').textContent='● Recording '+Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');
+    },1000);
+  }catch(error){
+    if(generation!==recordGeneration)return;
+    stopRecording();
+    $('#recordState').textContent='Could not record • allow microphone access and retry';
+  }
+}
+$('#record').onclick=startRecording;
+$('#showTakes').onclick=()=>$('#takes').classList.remove('hidden');
+$('#closeTakes').onclick=()=>$('#takes').classList.add('hidden');
+$('#phoneMode').onclick=()=>{
+  const enabled=prompter.classList.toggle('phoneMode');
+  $('#phoneMode').setAttribute('aria-pressed',String(enabled));
+  $('#phoneMode').textContent=enabled?'Glass layout':'Phone layout';
+  updateCurrent(true);
+};
+window.addEventListener('beforeunload',e=>{
+  if(takeCount || recordPending || (recorder && recorder.state!=='inactive')){e.preventDefault();e.returnValue='';}
+});
+
 let cameraStream = null;
 let cameraGeneration = 0;
 let cameraPending = false;
 function stopCamera(){
+  stopRecording();
   cameraGeneration++;
   cameraPending = false;
   if(cameraStream) cameraStream.getTracks().forEach(track=>track.stop());
@@ -421,10 +515,14 @@ async function toggleCamera(){
   $('#camera').textContent = 'Cancel camera';
   try{
     const stream = await navigator.mediaDevices.getUserMedia({
-      video:{facingMode:'user',width:{ideal:480},height:{ideal:640}},audio:false
+      video:{facingMode:'user',width:{ideal:720},height:{ideal:1280}},audio:false
     });
     if(generation !== cameraGeneration){stream.getTracks().forEach(t=>t.stop());return;}
     cameraStream = stream;
+    prompter.classList.add('phoneMode');
+    $('#phoneMode').setAttribute('aria-pressed','true');
+    $('#phoneMode').textContent='Glass layout';
+    updateCurrent(true);
     $('#cameraVideo').srcObject = stream;
     await $('#cameraVideo').play();
     if(generation !== cameraGeneration) return;
@@ -432,7 +530,7 @@ async function toggleCamera(){
     $('#cameraPreview').classList.remove('hidden');
     $('#camera').textContent = 'Camera off';
     $('#camera').setAttribute('aria-pressed','true');
-    $('#cameraMessage').textContent = 'Camera is a live preview only. No video is recorded or uploaded.';
+    $('#cameraMessage').textContent = 'Tap Record to capture video and sound. Recordings stay in this tab until you save them; video is not uploaded.';
   }catch(error){
     if(generation !== cameraGeneration) return;
     stopCamera();
